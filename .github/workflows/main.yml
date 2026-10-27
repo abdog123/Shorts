@@ -1,0 +1,60 @@
+name: daily-shorts
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  make:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        id: [FACTS, HISTORY, KIDS, STORIES]
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      PIXABAY_KEY: ${{ secrets.PIXABAY_KEY }}
+      TG_TOKEN: ${{ secrets.TG_TOKEN }}
+      TG_CHAT: ${{ secrets.TG_CHAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick fonts-hosny-amiri
+          sudo sed -i 's/rights="none" pattern="@\*"/rights="read|write" pattern="@*"/' /etc/ImageMagick-6/policy.xml || true
+      - name: Install MoneyPrinterTurbo
+        run: |
+          git clone --depth 1 https://github.com/harry0703/MoneyPrinterTurbo.git
+          cd MoneyPrinterTurbo
+          pip install -r requirements.txt
+          pip install anthropic requests
+          cp config.example.toml config.toml
+          sed -i "s|^pixabay_api_keys = .*|pixabay_api_keys = [\"$PIXABAY_KEY\"]|" config.toml
+          cp "$(fc-match -f '%{file}' 'Amiri')" resource/fonts/Arabic.ttf
+      - name: Start API
+        run: |
+          cd MoneyPrinterTurbo
+          nohup python main.py > ../mpt.log 2>&1 &
+          curl -sf --retry 40 --retry-delay 3 --retry-connrefused --retry-all-errors http://127.0.0.1:8080/docs > /dev/null
+      - name: Script (Claude)
+        run: python generate_script.py ${{ matrix.id }}
+      - name: Video
+        run: python run_video.py ${{ matrix.id }}
+      - name: Send to Telegram
+        run: python send_telegram.py ${{ matrix.id }}
+      - name: Save history
+        if: always()
+        run: |
+          git config user.name "bot"; git config user.email "bot@users.noreply.github.com"
+          git add history/ || true
+          git commit -m "history ${{ matrix.id }}" || exit 0
+          for i in 1 2 3; do git pull --rebase && git push && break || sleep 5; done
+      - name: Logs on failure
+        if: failure()
+        run: tail -n 80 mpt.log || true
